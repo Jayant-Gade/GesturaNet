@@ -9,10 +9,10 @@ class ActionController:
     def __init__(self):
         self.screen_w, self.screen_h = pyautogui.size()
         self.p_loc_x, self.p_loc_y = 0, 0
-        self.smoothening = 4
+        self.smoothening = 8  # Increased from 4 to reduce jitter/vibration
         
-        self.box_w = 200 
-        self.box_h = 130 
+        self.box_w = 300      # Increased from 200
+        self.box_h = 200      # Increased from 130
         self.anchor_x = 320
         self.anchor_y = 240
 
@@ -48,6 +48,8 @@ class ActionController:
 
     def left_click(self): pyautogui.click()
     def right_click(self): pyautogui.right_click()
+    def mouse_down(self): pyautogui.mouseDown()
+    def mouse_up(self): pyautogui.mouseUp()
     def close_app(self): pyautogui.hotkey('alt', 'f4')
     def volume_up(self): pyautogui.press('volumeup')
     def volume_down(self): pyautogui.press('volumedown')

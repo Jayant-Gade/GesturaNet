@@ -16,10 +16,12 @@ last_toggle_time = 0
 last_app_time = 0
 pinky_hold_start = 0 
 pinch_triggered = False       # Locks the pinch click
-last_gesture_seen = None      # Remembers your hand shape
 gesture_triggered = False     # Locks the custom gesture click
+mouse_mode = False            # When False, pinch movement is disabled
 
-# --- VOICE & CLICK CONFIG ---
+# --- GESTURE TIMERS ---
+play_pause_start = 0          # Tracks how long hand is in Open Palm
+play_pause_cooldown = 0       # Prevents double triggers
 next_click_source = "voice"   # Alternates: "voice" -> "gesture" -> "voice"
 voice_listener = VoiceListener()
 
@@ -48,6 +50,8 @@ def main():
     p_time = 0
 
     while cap.isOpened():
+        global mouse_mode, play_pause_start, play_pause_cooldown
+        
         if not camera_active:
             black_img = np.zeros((480, 640, 3), np.uint8)
             cv2.putText(black_img, "PRIVACY MODE: ON", (150, 220), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
@@ -62,14 +66,25 @@ def main():
         img = tracker.find_hands(img, draw=False)
         lm_list = tracker.get_position(img)
         
+        # Draw the control box always
+        pt1_x, pt1_y, pt2_x, pt2_y = controller.get_box()
+        box_color = (0, 255, 0) if system_engaged else (0, 0, 255)
+        if not mouse_mode: box_color = (128, 128, 128) # Gray if mouse mode is off
+        cv2.rectangle(img, (int(pt1_x), int(pt1_y)), (int(pt2_x), int(pt2_y)), box_color, 2)
+        cv2.putText(img, f"MOUSE BOX ({'ON' if mouse_mode else 'OFF'})", (int(pt1_x), int(pt1_y)-10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, box_color, 1)
+
+        # --- PROCESS VOICE RECOGNITION (GLOBAL) ---
+        v_cmd = voice_listener.get_command()
+        if v_cmd == "mouse_on": mouse_mode = True
+        elif v_cmd == "mouse_off": mouse_mode = False
+
         if len(lm_list) != 0:
             fingers = tracker.fingers_up(lm_list)
             
             # --- EDGE DETECTION RESET ---
-            # If your fingers change shape, unlock the gesture click!
-            if fingers != last_gesture_seen:
-                gesture_triggered = False
-                last_gesture_seen = fingers
+            if fingers != [0, 0, 0, 0, 0]: # Reset if hand is seen
+                # We handle gesture_triggered inside the loop now
+                pass
 
             # --- DEBOUNCED PINKY TOGGLE ---
             if fingers == [0, 0, 0, 0, 1]:
@@ -87,49 +102,60 @@ def main():
             if system_engaged:
                 cv2.putText(img, "STATUS: ACTIVE", (10, 450), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
                 
-                # --- PROCESS VOICE RECOGNITION ---
-                v_cmd = voice_listener.get_command()
-                if v_cmd == "click" and next_click_source == "voice":
-                    print("VOICE: Click recognized! Now waiting for gesture click...")
+                # Voice Mouse Actions (Only if system_engaged)
+                if v_cmd == "click":
                     controller.left_click()
-                    next_click_source = "gesture"
+                elif v_cmd == "hold":
+                    controller.mouse_down()
+                elif v_cmd == "release":
+                    controller.mouse_up()
 
-                pt1_x, pt1_y, pt2_x, pt2_y = controller.get_box()
-                cv2.rectangle(img, (int(pt1_x), int(pt1_y)), (int(pt2_x), int(pt2_y)), (255, 0, 255), 2)
-
-                thumb_tip = lm_list[4]
-                index_tip = lm_list[8]
-                dist = np.hypot(index_tip[1] - thumb_tip[1], index_tip[2] - thumb_tip[2])
-
-                # --- SINGLE-SHOT PINCH CLICK ---
-                if dist < 40:
-                    if not pinch_triggered and next_click_source == "gesture":
-                        print(f"PINCH CLICK! Dist: {int(dist)}. Now waiting for voice click...")
-                        controller.left_click()
-                        pinch_triggered = True # Lock it until fingers separate!
-                        next_click_source = "voice"
-                    cv2.circle(img, (index_tip[1], index_tip[2]), 15, (0, 255, 0), cv2.FILLED)
+                # --- MOUSE MODE & PINCH ---
+                if mouse_mode:
+                    thumb_tip = lm_list[4]
+                    index_tip = lm_list[8]
+                    dist = np.hypot(index_tip[1] - thumb_tip[1], index_tip[2] - thumb_tip[2])
+                    if dist < 40:
+                        controller.move_mouse(index_tip[1], index_tip[2])
+                        cv2.circle(img, (index_tip[1], index_tip[2]), 15, (0, 255, 0), cv2.FILLED)
+                        cv2.putText(img, "GRABBED", (index_tip[1]+20, index_tip[2]), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
                 else:
-                    pinch_triggered = False # Unlock pinch when fingers separate
-                
-                # --- DYNAMIC GESTURE MAPPING ---
-                for action_name, saved_gesture in cfg.config.items():
-                    if action_name == "paths": continue 
-                    # Only allow explicit features for right now:
-                    if action_name not in ["click", "play_pause"]: continue
-                    
-                    if fingers == saved_gesture:
-                        if action_name == "click":
-                            # --- SINGLE-SHOT GESTURE CLICK ---
-                            if not gesture_triggered and next_click_source == "gesture":
-                                print("GESTURE: Single-Shot Click. Now waiting for voice click...")
-                                controller.left_click()
-                                gesture_triggered = True # Lock it until fingers change shape!
-                                next_click_source = "voice"
+                    cv2.putText(img, "MOUSE MODE: OFF (Say 'Mouse Mode' to start)", (10, 410), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
 
-                        elif action_name == "play_pause" and (time.time() - last_app_time > 2.0):
-                            controller.play_pause()
-                            last_app_time = time.time()
+                # --- DYNAMIC GESTURE MAPPING (PLAY/PAUSE DELAY) ---
+                is_palm = (fingers == [1, 1, 1, 1, 1])
+                
+                if is_palm:
+                    if play_pause_start == 0:
+                        play_pause_start = time.time()
+                    
+                    elapsed = time.time() - play_pause_start
+                    # Target depends on state: 2s to Play, 1s to Pause
+                    # We'll use a 1.5s middle ground or just check if media is playing?
+                    # Since we don't know media state, we'll use 2 seconds of hold to toggle.
+                    target_time = 2.0 
+                    
+                    # Visual Feedback for the hold
+                    bar_width = int(np.interp(elapsed, [0, target_time], [0, 200]))
+                    cv2.rectangle(img, (220, 400), (220 + bar_width, 410), (0, 255, 255), cv2.FILLED)
+                    cv2.putText(img, "HOLD PALM...", (220, 390), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+
+                    if elapsed > target_time and (time.time() - play_pause_cooldown > 2.0):
+                        controller.play_pause()
+                        play_pause_cooldown = time.time()
+                        print("GESTURE: Play/Pause Triggered!")
+                else:
+                    play_pause_start = 0
+
+                # Other gestures (like click remapping)
+                for action_name, saved_gesture in cfg.config.items():
+                    if action_name == "click" and fingers == saved_gesture:
+                        if not gesture_triggered:
+                            controller.left_click()
+                            gesture_triggered = True
+                    # release trigger logic
+                    if fingers != saved_gesture: gesture_triggered = False
+
             else:
                 cv2.putText(img, "STATUS: STANDBY (Hold Pinky to Toggle)", (10, 450), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
 
